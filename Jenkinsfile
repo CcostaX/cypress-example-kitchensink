@@ -1,109 +1,87 @@
-// Example Jenkins pipeline with Cypress end-to-end tests running in parallel on 2 workers
-// Pipeline syntax from https://jenkins.io/doc/book/pipeline/
-
-// Setup:
-//  before starting Jenkins, I have created several volumes to cache
-//  Jenkins configuration, NPM modules and Cypress binary
-
-// docker volume create jenkins-data
-// docker volume create npm-cache
-// docker volume create cypress-cache
-
-// Start Jenkins command line by line:
-//  - run as "root" user (insecure, contact your admin to configure user and groups!)
-//  - run Docker in disconnected mode
-//  - name running container "blue-ocean"
-//  - map port 8080 with Jenkins UI
-//  - map volumes for Jenkins data, NPM and Cypress caches
-//  - pass Docker socket which allows Jenkins to start worker containers
-//  - download and execute the latest BlueOcean Docker image
-
-// docker run \
-//   -u root \
-//   -d \
-//   --name blue-ocean \
-//   -p 8080:8080 \
-//   -v jenkins-data:/var/jenkins_home \
-//   -v npm-cache:/root/.npm \
-//   -v cypress-cache:/root/.cache \
-//   -v /var/run/docker.sock:/var/run/docker.sock \
-//   jenkinsci/blueocean:latest
-
-// If you start for the very first time, inspect the logs from the running container
-// to see Administrator password - you will need it to configure Jenkins via localhost:8080 UI
-//    docker logs blue-ocean
-
 pipeline {
-  agent {
-    // this image provides everything needed to run Cypress
-    docker {
-      image 'cypress/base:18.14.1'
-    }
-  }
+      agent any
 
-  stages {
-    // first stage installs node dependencies and Cypress binary
-    stage('build') {
-      steps {
-        // there a few default environment variables on Jenkins
-        // on local Jenkins machine (assuming port 8080) see
-        // http://localhost:8080/pipeline-syntax/globals#env
-        echo "Running build ${env.BUILD_ID} on ${env.JENKINS_URL}"
-        sh 'npm ci'
-        sh 'npm run cy:verify'
-      }
-    }
+      tools {nodejs "NodeJS"}
 
-    stage('start local server') {
-      steps {
-        // start local server in the background
-        // we will shut it down in "post" command block
-        sh 'nohup npm run start &'
-      }
-    }
 
-    // this stage runs end-to-end tests, and each agent uses the workspace
-    // from the previous stage
-    stage('cypress parallel tests') {
-      environment {
-        // we will be recording test results and video on Cypress dashboard
-        // to record we need to set an environment variable
-        // we can load the record key variable from credentials store
-        // see https://jenkins.io/doc/book/using/using-credentials/
-        CYPRESS_RECORD_KEY = credentials('cypress-example-kitchensink-record-key')
-        // because parallel steps share the workspace they might race to delete
-        // screenshots and videos folders. Tell Cypress not to delete these folders
-        CYPRESS_trashAssetsBeforeRuns = 'false'
+      parameters{
+          string(name: 'SPEC', defaultValue:"cypress/e2e/1-getting-started/todo.cy.js", description: "Enter the cypress script path that you want to execute")
+          choice(name: 'BROWSER', choices:['electron', 'chrome', 'edge', 'firefox'], description: "Select the browser to be used in your cypress tests")
       }
 
-      // https://jenkins.io/doc/book/pipeline/syntax/#parallel
-      parallel {
-        // start several test jobs in parallel, and they all
-        // will use Cypress Dashboard to load balance any found spec files
-        stage('tester A') {
-          steps {
-            echo "Running build ${env.BUILD_ID}"
-            sh "npm run e2e:record:parallel"
-          }
+      options {
+              ansiColor('xterm')
+      }
+
+      stages {
+        stage('Build/Deploy app to staging') {
+            steps {
+              echo "Copying files to staging and restarting the app"
+                sshPublisher(
+                    publishers: [
+                        sshPublisherDesc(
+                            configName: 'staging',
+                            transfers: [
+                                sshTransfer(
+                                    cleanRemote: false,
+                                    excludes: 'node_modules/,cypress/,**/*.yml',
+                                    execCommand: '''
+                                    cd /usr/share/nginx/html
+                                    npm ci
+                                    pm2 restart todoApp -- start''',
+                                    execTimeout: 1200000,
+                                    flatten: false,
+                                    makeEmptyDirs: false,
+                                    noDefaultExcludes: false,
+                                    patternSeparator: '[, ]+',
+                                    remoteDirectory: '',
+                                    remoteDirectorySDF: false,
+                                    removePrefix: '',
+                                    sourceFiles: '**/*')],
+                        usePromotionTimestamp: false,
+                        useWorkspaceInPromotion: false,
+                        verbose: true)])
+         }
+        }
+        stage('Run automated tests'){
+            steps {
+              echo "Running automated tests"
+                sh 'npm prune'
+                sh 'npm cache clean --force'
+                sh 'npm i'
+                sh 'npm install --save-dev mochawesome mochawesome-merge mochawesome-report-generator'
+                sh 'npm run e2e:staging1spec'
+            }
+            post {
+                success {
+                    publishHTML (
+                        target : [
+                            allowMissing: false,
+                            alwaysLinkToLastBuild: true,
+                            keepAll: true,
+                            reportDir: 'mochawesome-report',
+                            reportFiles: 'mochawesome.html',
+                            reportName: 'My Reports',
+                            reportTitles: 'The Report'])
+
+                }
+            }
         }
 
-        // second tester runs the same command
-        stage('tester B') {
-          steps {
-            echo "Running build ${env.BUILD_ID}"
-            sh "npm run e2e:record:parallel"
-          }
+       
+        stage('Perform manual testing...'){
+            steps {
+                timeout(activity: true, time: 5) {
+                    input 'Proceed to production?'
+                }
+           }
         }
-      }
 
+        stage('Release to production') {
+            steps {
+            // similar procedure as in the 'Build/ Deploy to staging' stage, suppressed here for cost saving purposes
+                echo "Deploying app in production environment"
+           }
+        }
     }
-  }
-
-  post {
-    // shutdown the server running in the background
-    always {
-      echo 'Stopping local server'
-      sh 'pkill -f http-server'
-    }
-  }
 }
