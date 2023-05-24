@@ -1,0 +1,6 @@
+projectKey=Jenkins_2220662
+serverUrl=https://sonar.creis.pt
+serverVersion=8.3.1.34397
+dashboardUrl=https://sonar.creis.pt/dashboard?id=Jenkins_2220662
+ceTaskId=AYhOvm0qycD9pccTjLW5
+ceTaskUrl=https://sonar.creis.pt/api/ce/task?id=AYhOvm0qycD9pccTjLW5
